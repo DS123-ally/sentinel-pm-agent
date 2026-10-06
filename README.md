@@ -20,7 +20,7 @@ LangGraph, Python, FastAPI, Jira API, Slack API, SQLite
 
 ## Status
 
-Phase 6 is in progress. Nudge messages include Done, Blocked, and Need more time buttons. A click is saved locally and does not change Jira.
+Phase 7 is in progress. A button click is posted in the Slack channel with Approve and Reject. Jira changes only after Approve.
 
 ## Setup
 

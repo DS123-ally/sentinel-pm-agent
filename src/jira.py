@@ -86,6 +86,72 @@ def fetch_tasks_with_comments() -> list[Task]:
     return loaded
 
 
+def choose_transition(transitions: list[dict], status_name: str) -> str | None:
+    """Pick the transition id whose name or destination matches status_name."""
+    wanted = status_name.strip().casefold()
+    for item in transitions:
+        name = str(item.get("name") or "").casefold()
+        target = str((item.get("to") or {}).get("name") or "").casefold()
+        if wanted in (name, target) and item.get("id") is not None:
+            return str(item["id"])
+    return None
+
+
+def transition_issue(key: str, status_name: str) -> None:
+    """Move a Jira issue to status_name using one of its available transitions."""
+    base_url, auth, _project_key = _jira_auth()
+    response = requests.get(
+        f"{base_url}/rest/api/3/issue/{key}/transitions",
+        auth=auth,
+        timeout=30,
+    )
+    response.raise_for_status()
+    transition_id = choose_transition(response.json().get("transitions", []), status_name)
+    if not transition_id:
+        raise RuntimeError(f"No Jira transition to {status_name} for {key}.")
+    response = requests.post(
+        f"{base_url}/rest/api/3/issue/{key}/transitions",
+        auth=auth,
+        json={"transition": {"id": transition_id}},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def add_comment(key: str, text: str) -> None:
+    """Add one plain-text comment to a Jira issue."""
+    base_url, auth, _project_key = _jira_auth()
+    response = requests.post(
+        f"{base_url}/rest/api/3/issue/{key}/comment",
+        auth=auth,
+        json={
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+                ],
+            }
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def apply_decision(task_key: str, action: str) -> None:
+    """Write an approved Slack decision to Jira."""
+    if action == "done":
+        transition_issue(task_key, "Done")
+        return
+    if action == "blocked":
+        add_comment(task_key, "Marked blocked in Slack.")
+        return
+    if action == "need_time":
+        add_comment(task_key, "Asked for more time in Slack.")
+        return
+    raise RuntimeError(f"Unknown decision {action}.")
+
+
 def _jira_auth() -> tuple[str, HTTPBasicAuth, str]:
     load_dotenv(ROOT / ".env")
     base_url = os.environ["JIRA_BASE_URL"].rstrip("/")

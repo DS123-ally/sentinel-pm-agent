@@ -104,6 +104,102 @@ def test_socket_mode_click_is_saved(tmp_path, monkeypatch):
     assert "Blocked" in posted["text"]
 
 
+def _approval_id(db_path: Path) -> int:
+    connection = connect(db_path)
+    approval_id = connection.execute("SELECT id FROM approvals").fetchone()[0]
+    connection.close()
+    return approval_id
+
+
+def test_a_click_posts_approval_and_does_not_write_jira(tmp_path):
+    db_path = tmp_path / "nudges.db"
+    posted = []
+    applied = []
+    handle_action(
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_done", "value": "KAN-2"}]},
+        db_path,
+        NOW,
+        post_channel=lambda text, blocks: posted.append(blocks),
+        apply_jira=lambda key, action: applied.append((key, action)),
+    )
+    buttons = posted[0][1]["elements"]
+    assert [button["text"]["text"] for button in buttons] == ["Approve", "Reject"]
+    assert applied == []
+    connection = connect(db_path)
+    status = connection.execute("SELECT status FROM approvals").fetchone()[0]
+    connection.close()
+    assert status == "pending"
+
+
+def test_reject_leaves_jira_unchanged(tmp_path):
+    db_path = tmp_path / "nudges.db"
+    applied = []
+    handle_action(
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_blocked", "value": "KAN-2"}]},
+        db_path,
+        NOW,
+        apply_jira=lambda key, action: applied.append((key, action)),
+    )
+    body = handle_action(
+        {"actions": [{"action_id": "reject_request", "value": str(_approval_id(db_path))}]},
+        db_path,
+        NOW,
+        apply_jira=lambda key, action: applied.append((key, action)),
+    )
+    assert "not changed" in body["text"]
+    assert applied == []
+
+
+def test_approve_writes_jira_once(tmp_path):
+    db_path = tmp_path / "nudges.db"
+    applied = []
+    handle_action(
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_need_time", "value": "KAN-2"}]},
+        db_path,
+        NOW,
+    )
+    approval_id = str(_approval_id(db_path))
+    body = handle_action(
+        {"actions": [{"action_id": "approve_request", "value": approval_id}]},
+        db_path,
+        NOW,
+        apply_jira=lambda key, action: applied.append((key, action)),
+    )
+    again = handle_action(
+        {"actions": [{"action_id": "approve_request", "value": approval_id}]},
+        db_path,
+        NOW,
+        apply_jira=lambda key, action: applied.append((key, action)),
+    )
+    assert applied == [("KAN-2", "need_time")]
+    assert "Approved" in body["text"]
+    assert "already approved" in again["text"]
+
+
+def test_a_failed_jira_write_stays_pending(tmp_path):
+    db_path = tmp_path / "nudges.db"
+    handle_action(
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_done", "value": "KAN-2"}]},
+        db_path,
+        NOW,
+    )
+
+    def fail(key, action):
+        raise RuntimeError("no transition")
+
+    body = handle_action(
+        {"actions": [{"action_id": "approve_request", "value": str(_approval_id(db_path))}]},
+        db_path,
+        NOW,
+        apply_jira=fail,
+    )
+    assert "did not update" in body["text"]
+    connection = connect(db_path)
+    status = connection.execute("SELECT status FROM approvals").fetchone()[0]
+    connection.close()
+    assert status == "pending"
+
+
 def test_signed_click_is_accepted_and_a_bad_signature_is_rejected(tmp_path):
     db_path = tmp_path / "nudges.db"
     raw = urlencode(

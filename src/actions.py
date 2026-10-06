@@ -1,4 +1,4 @@
-"""Phase 6: Done, Blocked, and Need more time buttons on nudge messages."""
+"""Slack buttons and the approval step before any Jira write."""
 
 import hashlib
 import hmac
@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from jira import ROOT, Task
+from jira import ROOT, Task, apply_decision
 
 DB_PATH = ROOT / "data" / "nudges.db"
 
@@ -105,6 +105,18 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            slack_user_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            received_at TEXT NOT NULL
+        )
+        """
+    )
     return connection
 
 
@@ -125,14 +137,36 @@ def record_reply(
     connection.commit()
 
 
+def approval_blocks(task_key: str, kind: str, approval_id: int) -> list[dict]:
+    """Channel message asking a person to approve one decision."""
+    text = f"*{task_key}* was marked *{LABELS[kind]}*. Approve before Jira changes."
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {
+            "type": "actions",
+            "block_id": f"approval-{approval_id}",
+            "elements": [
+                _button("Approve", "approve_request", str(approval_id), "primary"),
+                _button("Reject", "reject_request", str(approval_id), "danger"),
+            ],
+        },
+    ]
+
+
 def handle_action(
     payload: dict,
     db_path: Path = DB_PATH,
     now: datetime | None = None,
+    post_channel=None,
+    apply_jira=None,
 ) -> dict:
-    """Save the click. Jira is left alone until a later approval step."""
+    """Save a task click for approval, or apply a decision after Approve."""
     action = (payload.get("actions") or [{}])[0]
-    kind = ACTIONS.get(str(action.get("action_id") or ""))
+    action_id = str(action.get("action_id") or "")
+    if action_id in ("approve_request", "reject_request"):
+        return _decide(action_id, action.get("value"), db_path, apply_jira or apply_decision)
+
+    kind = ACTIONS.get(action_id)
     task_key = str(action.get("value") or "").strip()
     slack_user_id = str((payload.get("user") or {}).get("id") or "")
     if not kind or not task_key:
@@ -141,14 +175,87 @@ def handle_action(
     received_at = now or datetime.now(timezone.utc)
     connection = connect(db_path)
     record_reply(connection, task_key, kind, slack_user_id, received_at)
+    cursor = connection.execute(
+        """
+        INSERT INTO approvals (task_key, action, slack_user_id, status, received_at)
+        VALUES (?, ?, ?, 'pending', ?)
+        """,
+        (task_key, kind, slack_user_id, received_at.isoformat()),
+    )
+    approval_id = int(cursor.lastrowid)
+    connection.commit()
     connection.close()
-    return {
-        "replace_original": False,
-        "text": (
-            f"Recorded {task_key} as {LABELS[kind]}. "
-            "Jira stays unchanged until a person approves."
-        ),
-    }
+
+    notice = (
+        f"Recorded {task_key} as {LABELS[kind]}. "
+        "Jira stays unchanged until a person approves."
+    )
+    blocks = approval_blocks(task_key, kind, approval_id)
+    if post_channel is not None:
+        try:
+            post_channel(blocks[0]["text"]["text"], blocks)
+        except Exception as error:
+            return {
+                "replace_original": False,
+                "text": f"{notice} The approval message was not posted. {error}",
+            }
+    return {"replace_original": False, "text": notice}
+
+
+def _decide(action_id: str, raw_id, db_path: Path, apply_jira) -> dict:
+    try:
+        approval_id = int(str(raw_id).strip())
+    except (TypeError, ValueError):
+        return {"replace_original": False, "text": "That button was not recognized."}
+
+    connection = connect(db_path)
+    row = connection.execute(
+        "SELECT task_key, action, status FROM approvals WHERE id = ?",
+        (approval_id,),
+    ).fetchone()
+    if row is None:
+        connection.close()
+        return {"replace_original": False, "text": "That button was not recognized."}
+    task_key, kind, status = row
+    if status != "pending":
+        connection.close()
+        return {"replace_original": False, "text": f"{task_key} was already {status}."}
+
+    if action_id == "reject_request":
+        connection.execute(
+            "UPDATE approvals SET status = 'rejected' WHERE id = ? AND status = 'pending'",
+            (approval_id,),
+        )
+        connection.commit()
+        connection.close()
+        return {
+            "replace_original": True,
+            "text": f"Rejected. {task_key} was not changed in Jira.",
+        }
+
+    try:
+        apply_jira(task_key, kind)
+    except Exception as error:
+        connection.close()
+        return {
+            "replace_original": False,
+            "text": f"Jira did not update {task_key}. {error}",
+        }
+    connection.execute(
+        "UPDATE approvals SET status = 'approved' WHERE id = ? AND status = 'pending'",
+        (approval_id,),
+    )
+    connection.commit()
+    connection.close()
+    return {"replace_original": True, "text": _approved_text(task_key, kind)}
+
+
+def _approved_text(task_key: str, kind: str) -> str:
+    if kind == "done":
+        return f"Approved. {task_key} was moved to Done in Jira."
+    if kind == "blocked":
+        return f"Approved. A blocked comment was added to {task_key} in Jira."
+    return f"Approved. A comment was added to {task_key} in Jira asking for more time."
 
 
 def handle_request(
@@ -185,7 +292,7 @@ def on_socket_request(client, request, db_path: Path = DB_PATH) -> None:
     if getattr(request, "type", "") != "interactive":
         return
     payload = request.payload if isinstance(request.payload, dict) else {}
-    body = handle_action(payload, db_path)
+    body = handle_action(payload, db_path, post_channel=_poster_from(client))
     response_url = str(payload.get("response_url") or "")
     if not response_url:
         print(body["text"])
@@ -208,12 +315,25 @@ def run_socket_mode(app_token: str) -> None:
     threading.Event().wait()
 
 
-def _button(label: str, action_id: str, task_key: str, style: str | None = None) -> dict:
+def _poster_from(client):
+    web = getattr(client, "web_client", None)
+    if web is None:
+        return None
+    load_dotenv(ROOT / ".env")
+    channel = os.getenv("SLACK_CHANNEL", "#pm-agent").strip() or "#pm-agent"
+
+    def post(text: str, blocks: list[dict]) -> None:
+        web.chat_postMessage(channel=channel, text=text, blocks=blocks)
+
+    return post
+
+
+def _button(label: str, action_id: str, value: str, style: str | None = None) -> dict:
     button = {
         "type": "button",
         "text": {"type": "plain_text", "text": label},
         "action_id": action_id,
-        "value": task_key,
+        "value": value,
     }
     if style:
         button["style"] = style
