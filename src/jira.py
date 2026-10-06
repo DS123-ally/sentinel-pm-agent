@@ -17,6 +17,7 @@ class Task:
     status: str
     due_date: str
     last_updated: str
+    assignee_email: str = ""
 
 
 def fetch_tasks() -> list[Task]:
@@ -66,6 +67,7 @@ def _to_task(issue: dict) -> Task:
         status=status.get("name") or "Unknown",
         due_date=fields.get("duedate") or "-",
         last_updated=_short_date(fields.get("updated")),
+        assignee_email=assignee.get("emailAddress") or "",
     )
 
 

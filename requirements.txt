@@ -4,3 +4,4 @@ fastapi
 slack_sdk
 uvicorn
 pytest
+apscheduler
