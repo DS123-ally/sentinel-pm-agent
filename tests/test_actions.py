@@ -47,20 +47,20 @@ def test_a_click_is_saved_and_jira_is_not_mentioned_as_updated(tmp_path):
     body = handle_action(
         {
             "user": {"id": "U123"},
-            "actions": [{"action_id": "task_need_time", "value": "KAN-2"}],
+            "actions": [{"action_id": "task_done", "value": "KAN-2"}],
         },
         db_path,
         NOW,
     )
     assert "KAN-2" in body["text"]
-    assert "Need more time" in body["text"]
+    assert "Done" in body["text"]
     assert "unchanged" in body["text"]
     connection = connect(db_path)
     row = connection.execute(
         "SELECT task_key, action, slack_user_id FROM replies"
     ).fetchone()
     connection.close()
-    assert row == ("KAN-2", "need_time", "U123")
+    assert row == ("KAN-2", "done", "U123")
 
 
 def test_unknown_button_is_not_saved(tmp_path):
@@ -150,33 +150,39 @@ def test_reject_leaves_jira_unchanged(tmp_path):
     assert applied == []
 
 
-def test_approve_writes_jira_once(tmp_path):
+def test_approve_writes_jira_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLACK_APPROVER_ID", "UAPPROVE")
     db_path = tmp_path / "nudges.db"
     applied = []
     handle_action(
-        {"user": {"id": "U123"}, "actions": [{"action_id": "task_need_time", "value": "KAN-2"}]},
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_done", "value": "KAN-2"}]},
         db_path,
         NOW,
     )
     approval_id = str(_approval_id(db_path))
+
+    def record(key, action, due_date=""):
+        applied.append((key, action, due_date))
+
     body = handle_action(
-        {"actions": [{"action_id": "approve_request", "value": approval_id}]},
+        {"user": {"id": "UAPPROVE"}, "actions": [{"action_id": "approve_request", "value": approval_id}]},
         db_path,
         NOW,
-        apply_jira=lambda key, action: applied.append((key, action)),
+        apply_jira=record,
     )
     again = handle_action(
-        {"actions": [{"action_id": "approve_request", "value": approval_id}]},
+        {"user": {"id": "UAPPROVE"}, "actions": [{"action_id": "approve_request", "value": approval_id}]},
         db_path,
         NOW,
-        apply_jira=lambda key, action: applied.append((key, action)),
+        apply_jira=record,
     )
-    assert applied == [("KAN-2", "need_time")]
+    assert applied == [("KAN-2", "done", "")]
     assert "Approved" in body["text"]
     assert "already approved" in again["text"]
 
 
-def test_a_failed_jira_write_stays_pending(tmp_path):
+def test_a_failed_jira_write_stays_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLACK_APPROVER_ID", "UAPPROVE")
     db_path = tmp_path / "nudges.db"
     handle_action(
         {"user": {"id": "U123"}, "actions": [{"action_id": "task_done", "value": "KAN-2"}]},
@@ -184,16 +190,92 @@ def test_a_failed_jira_write_stays_pending(tmp_path):
         NOW,
     )
 
-    def fail(key, action):
+    def fail(key, action, due_date=""):
         raise RuntimeError("no transition")
 
     body = handle_action(
-        {"actions": [{"action_id": "approve_request", "value": str(_approval_id(db_path))}]},
+        {
+            "user": {"id": "UAPPROVE"},
+            "actions": [{"action_id": "approve_request", "value": str(_approval_id(db_path))}],
+        },
         db_path,
         NOW,
         apply_jira=fail,
     )
     assert "did not update" in body["text"]
+    connection = connect(db_path)
+    status = connection.execute("SELECT status FROM approvals").fetchone()[0]
+    connection.close()
+    assert status == "pending"
+
+
+def test_need_more_time_asks_for_a_date_then_approves_that_date(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLACK_APPROVER_ID", "UAPPROVE")
+    db_path = tmp_path / "nudges.db"
+    posted = []
+    applied = []
+    prompt = handle_action(
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_need_time", "value": "KAN-2"}]},
+        db_path,
+        NOW,
+    )
+    assert prompt["blocks"][1]["elements"][0]["action_id"] == "pick_due_date"
+    connection = connect(db_path)
+    assert connection.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0
+    connection.close()
+
+    handle_action(
+        {
+            "user": {"id": "U123"},
+            "actions": [
+                {
+                    "action_id": "pick_due_date",
+                    "block_id": "due-KAN-2",
+                    "selected_date": "2026-10-20",
+                }
+            ],
+        },
+        db_path,
+        NOW,
+        post_channel=lambda text, blocks: posted.append(text),
+        apply_jira=lambda *args: applied.append(args),
+    )
+    assert "2026-10-20" in posted[0]
+    assert applied == []
+
+    body = handle_action(
+        {
+            "user": {"id": "UAPPROVE"},
+            "actions": [{"action_id": "approve_request", "value": str(_approval_id(db_path))}],
+        },
+        db_path,
+        NOW,
+        apply_jira=lambda *args: applied.append(args),
+    )
+    assert applied == [("KAN-2", "need_time", "2026-10-20")]
+    assert "2026-10-20" in body["text"]
+
+
+def test_someone_else_cannot_approve(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLACK_APPROVER_ID", "UAPPROVE")
+    db_path = tmp_path / "nudges.db"
+    applied = []
+    handle_action(
+        {"user": {"id": "U123"}, "actions": [{"action_id": "task_done", "value": "KAN-2"}]},
+        db_path,
+        NOW,
+    )
+    body = handle_action(
+        {
+            "user": {"id": "UOTHER"},
+            "actions": [{"action_id": "approve_request", "value": str(_approval_id(db_path))}],
+        },
+        db_path,
+        NOW,
+        apply_jira=lambda *args: applied.append(args),
+    )
+    assert "Only the approver" in body["text"]
+    assert applied == []
     connection = connect(db_path)
     status = connection.execute("SELECT status FROM approvals").fetchone()[0]
     connection.close()

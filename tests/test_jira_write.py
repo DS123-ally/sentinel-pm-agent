@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from jira import add_comment, choose_transition, transition_issue
+from jira import add_comment, choose_transition, set_due_date, transition_issue
 
 
 def test_choose_transition_matches_the_destination_status():
@@ -42,6 +42,27 @@ def test_done_posts_the_matching_transition(monkeypatch):
         (
             "https://example.atlassian.net/rest/api/3/issue/KAN-2/transitions",
             {"transition": {"id": "31"}},
+        )
+    ]
+
+
+def test_need_more_time_sets_the_due_date(monkeypatch):
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        "jira.requests.put",
+        lambda url, **kwargs: calls.append((url, kwargs.get("json"))) or Response(),
+    )
+    monkeypatch.setattr("jira._jira_auth", lambda: ("https://example.atlassian.net", None, "KAN"))
+    set_due_date("KAN-2", "2026-10-20")
+    assert calls == [
+        (
+            "https://example.atlassian.net/rest/api/3/issue/KAN-2",
+            {"fields": {"duedate": "2026-10-20"}},
         )
     ]
 

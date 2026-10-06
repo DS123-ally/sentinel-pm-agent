@@ -20,7 +20,7 @@ LangGraph, Python, FastAPI, Jira API, Slack API, SQLite
 
 ## Status
 
-Phase 7 is in progress. A button click is posted in the Slack channel with Approve and Reject. Jira changes only after Approve.
+A button click is posted in the Slack channel with Approve and Reject. Only the Slack user in `SLACK_APPROVER_ID` can approve. Jira changes only after that approval. Need more time asks for a new due date and writes that date to Jira.
 
 ## Setup
 
@@ -48,10 +48,16 @@ Print every task in the Jira project:
 python src\jira.py
 ```
 
-Run the morning agent (digest, nudges, and blocker check):
+Run the morning agent once (digest, nudges, and blocker check):
 
 ```powershell
 python src\morning.py
+```
+
+Leave a window open so the same job runs every day at 9:00 AM India time. `python src\digest.py --daily` starts that same job.
+
+```powershell
+python src\morning.py --daily
 ```
 
 Listen for button clicks. With Socket Mode on, Slack does not use a Request URL. Create an app-level token with the `connections:write` scope, put it in `.env` as `SLACK_APP_TOKEN`, then run:

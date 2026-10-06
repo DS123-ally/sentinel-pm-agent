@@ -113,10 +113,14 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
             action TEXT NOT NULL,
             slack_user_id TEXT NOT NULL,
             status TEXT NOT NULL,
-            received_at TEXT NOT NULL
+            received_at TEXT NOT NULL,
+            due_date TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(approvals)")}
+    if "due_date" not in columns:
+        connection.execute("ALTER TABLE approvals ADD COLUMN due_date TEXT NOT NULL DEFAULT ''")
     return connection
 
 
@@ -137,9 +141,20 @@ def record_reply(
     connection.commit()
 
 
-def approval_blocks(task_key: str, kind: str, approval_id: int) -> list[dict]:
+def approval_blocks(
+    task_key: str,
+    kind: str,
+    approval_id: int,
+    due_date: str = "",
+) -> list[dict]:
     """Channel message asking a person to approve one decision."""
-    text = f"*{task_key}* was marked *{LABELS[kind]}*. Approve before Jira changes."
+    if kind == "need_time" and due_date:
+        text = (
+            f"*{task_key}* needs more time. New due date: *{due_date}*. "
+            "Approve before Jira changes."
+        )
+    else:
+        text = f"*{task_key}* was marked *{LABELS[kind]}*. Approve before Jira changes."
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
         {
@@ -163,22 +178,34 @@ def handle_action(
     """Save a task click for approval, or apply a decision after Approve."""
     action = (payload.get("actions") or [{}])[0]
     action_id = str(action.get("action_id") or "")
+    slack_user_id = str((payload.get("user") or {}).get("id") or "")
     if action_id in ("approve_request", "reject_request"):
-        return _decide(action_id, action.get("value"), db_path, apply_jira or apply_decision)
+        return _decide(
+            action_id,
+            action.get("value"),
+            db_path,
+            apply_jira or apply_decision,
+            slack_user_id,
+        )
+    if action_id == "pick_due_date":
+        return _open_due_date_approval(action, slack_user_id, db_path, now, post_channel)
 
     kind = ACTIONS.get(action_id)
     task_key = str(action.get("value") or "").strip()
-    slack_user_id = str((payload.get("user") or {}).get("id") or "")
     if not kind or not task_key:
         return {"replace_original": False, "text": "That button was not recognized."}
 
     received_at = now or datetime.now(timezone.utc)
     connection = connect(db_path)
     record_reply(connection, task_key, kind, slack_user_id, received_at)
+    if kind == "need_time":
+        connection.close()
+        return _due_date_prompt(task_key)
+
     cursor = connection.execute(
         """
-        INSERT INTO approvals (task_key, action, slack_user_id, status, received_at)
-        VALUES (?, ?, ?, 'pending', ?)
+        INSERT INTO approvals (task_key, action, slack_user_id, status, received_at, due_date)
+        VALUES (?, ?, ?, 'pending', ?, '')
         """,
         (task_key, kind, slack_user_id, received_at.isoformat()),
     )
@@ -202,7 +229,85 @@ def handle_action(
     return {"replace_original": False, "text": notice}
 
 
-def _decide(action_id: str, raw_id, db_path: Path, apply_jira) -> dict:
+def _due_date_prompt(task_key: str) -> dict:
+    return {
+        "replace_original": False,
+        "text": f"Pick a new due date for {task_key}. Jira stays unchanged until a person approves.",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"Pick a new due date for *{task_key}*."},
+            },
+            {
+                "type": "actions",
+                "block_id": f"due-{task_key}",
+                "elements": [
+                    {
+                        "type": "datepicker",
+                        "action_id": "pick_due_date",
+                        "placeholder": {"type": "plain_text", "text": "New due date"},
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def _open_due_date_approval(action: dict, slack_user_id: str, db_path: Path, now, post_channel) -> dict:
+    block_id = str(action.get("block_id") or "")
+    task_key = block_id[4:] if block_id.startswith("due-") else ""
+    due_date = str(action.get("selected_date") or "").strip()
+    if not task_key or not _iso_date(due_date):
+        return {"replace_original": False, "text": "Pick a due date before this can be approved."}
+
+    received_at = now or datetime.now(timezone.utc)
+    connection = connect(db_path)
+    cursor = connection.execute(
+        """
+        INSERT INTO approvals (task_key, action, slack_user_id, status, received_at, due_date)
+        VALUES (?, 'need_time', ?, 'pending', ?, ?)
+        """,
+        (task_key, slack_user_id, received_at.isoformat(), due_date),
+    )
+    approval_id = int(cursor.lastrowid)
+    connection.commit()
+    connection.close()
+    notice = (
+        f"Recorded {task_key} as Need more time, due {due_date}. "
+        "Jira stays unchanged until a person approves."
+    )
+    blocks = approval_blocks(task_key, "need_time", approval_id, due_date)
+    if post_channel is not None:
+        try:
+            post_channel(blocks[0]["text"]["text"], blocks)
+        except Exception as error:
+            return {
+                "replace_original": False,
+                "text": f"{notice} The approval message was not posted. {error}",
+            }
+    return {"replace_original": False, "text": notice}
+
+
+def _iso_date(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def _approver_block(slack_user_id: str) -> str:
+    """Empty when this person may approve. Otherwise the reason to refuse."""
+    load_dotenv(ROOT / ".env")
+    allowed = os.getenv("SLACK_APPROVER_ID", "").strip()
+    if not allowed or allowed == "U0123456789":
+        return "Add SLACK_APPROVER_ID to the .env file before approving."
+    if slack_user_id != allowed:
+        return "Only the approver can approve this."
+    return ""
+
+
+def _decide(action_id: str, raw_id, db_path: Path, apply_jira, slack_user_id: str) -> dict:
     try:
         approval_id = int(str(raw_id).strip())
     except (TypeError, ValueError):
@@ -210,16 +315,22 @@ def _decide(action_id: str, raw_id, db_path: Path, apply_jira) -> dict:
 
     connection = connect(db_path)
     row = connection.execute(
-        "SELECT task_key, action, status FROM approvals WHERE id = ?",
+        "SELECT task_key, action, status, due_date FROM approvals WHERE id = ?",
         (approval_id,),
     ).fetchone()
     if row is None:
         connection.close()
         return {"replace_original": False, "text": "That button was not recognized."}
-    task_key, kind, status = row
+    task_key, kind, status, due_date = row
     if status != "pending":
         connection.close()
         return {"replace_original": False, "text": f"{task_key} was already {status}."}
+
+    if action_id == "approve_request":
+        reason = _approver_block(slack_user_id)
+        if reason:
+            connection.close()
+            return {"replace_original": False, "text": reason}
 
     if action_id == "reject_request":
         connection.execute(
@@ -234,7 +345,7 @@ def _decide(action_id: str, raw_id, db_path: Path, apply_jira) -> dict:
         }
 
     try:
-        apply_jira(task_key, kind)
+        apply_jira(task_key, kind, due_date or "")
     except Exception as error:
         connection.close()
         return {
@@ -247,15 +358,15 @@ def _decide(action_id: str, raw_id, db_path: Path, apply_jira) -> dict:
     )
     connection.commit()
     connection.close()
-    return {"replace_original": True, "text": _approved_text(task_key, kind)}
+    return {"replace_original": True, "text": _approved_text(task_key, kind, due_date or "")}
 
 
-def _approved_text(task_key: str, kind: str) -> str:
+def _approved_text(task_key: str, kind: str, due_date: str = "") -> str:
     if kind == "done":
         return f"Approved. {task_key} was moved to Done in Jira."
     if kind == "blocked":
         return f"Approved. A blocked comment was added to {task_key} in Jira."
-    return f"Approved. A comment was added to {task_key} in Jira asking for more time."
+    return f"Approved. {task_key} is now due {due_date} in Jira."
 
 
 def handle_request(

@@ -23,6 +23,15 @@ def make_task(key: str, title: str, due_date: str, assignee: str = "Dinesh") -> 
     )
 
 
+def test_daily_command_runs_the_full_morning_job(monkeypatch):
+    called = []
+    monkeypatch.setattr("morning.run_scheduled", lambda: called.append("morning"))
+    from digest import run_daily
+
+    run_daily()
+    assert called == ["morning"]
+
+
 def test_digest_lists_each_risk_group():
     groups = {
         "overdue": [make_task("KAN-2", "Write test plan", "2026-10-01")],

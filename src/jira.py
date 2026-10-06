@@ -138,7 +138,19 @@ def add_comment(key: str, text: str) -> None:
     response.raise_for_status()
 
 
-def apply_decision(task_key: str, action: str) -> None:
+def set_due_date(key: str, due_date: str) -> None:
+    """Set an issue due date. due_date is YYYY-MM-DD."""
+    base_url, auth, _project_key = _jira_auth()
+    response = requests.put(
+        f"{base_url}/rest/api/3/issue/{key}",
+        auth=auth,
+        json={"fields": {"duedate": due_date}},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def apply_decision(task_key: str, action: str, due_date: str = "") -> None:
     """Write an approved Slack decision to Jira."""
     if action == "done":
         transition_issue(task_key, "Done")
@@ -147,7 +159,9 @@ def apply_decision(task_key: str, action: str) -> None:
         add_comment(task_key, "Marked blocked in Slack.")
         return
     if action == "need_time":
-        add_comment(task_key, "Asked for more time in Slack.")
+        if not due_date:
+            raise RuntimeError(f"No due date for {task_key}.")
+        set_due_date(task_key, due_date)
         return
     raise RuntimeError(f"Unknown decision {action}.")
 

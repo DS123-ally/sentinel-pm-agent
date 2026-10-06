@@ -13,7 +13,6 @@ from jira import Task, fetch_tasks
 from risk import group_risks
 
 ROOT = Path(__file__).resolve().parents[1]
-DIGEST_HOUR = 9
 LABELS = (
     ("overdue", "Overdue"),
     ("due_soon", "Due soon"),
@@ -80,17 +79,10 @@ def send_today() -> None:
 
 
 def run_daily() -> None:
-    """Keep this window open. Posts once every morning at 9:00 India time."""
-    from apscheduler.schedulers.blocking import BlockingScheduler
-    from apscheduler.triggers.cron import CronTrigger
+    """Keep this window open. At 9:00 the full morning job runs, not the digest alone."""
+    from morning import run_scheduled
 
-    scheduler = BlockingScheduler()
-    scheduler.add_job(
-        send_today,
-        CronTrigger(hour=DIGEST_HOUR, minute=0, timezone="Asia/Kolkata"),
-    )
-    print("Daily digest scheduled for 9:00 AM India time. Leave this window open.")
-    scheduler.start()
+    run_scheduled()
 
 
 if __name__ == "__main__":
