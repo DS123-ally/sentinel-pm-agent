@@ -21,7 +21,11 @@ LABELS = (
 )
 
 
-def format_digest(groups: dict[str, list[Task]], today: date | None = None) -> str:
+def format_digest(
+    groups: dict[str, list[Task]],
+    today: date | None = None,
+    blockers: list[dict] | None = None,
+) -> str:
     """Turn the three risk groups into one Slack message."""
     current = today or date.today()
     lines = [f"*PM Agent daily digest* — {current.isoformat()}", ""]
@@ -36,10 +40,23 @@ def format_digest(groups: dict[str, list[Task]], today: date | None = None) -> s
                     f"• {task.key} {task.title} — due {task.due_date} ({task.assignee})"
                 )
         lines.append("")
+    if blockers is not None:
+        flagged = [item for item in blockers if item.get("blocked")]
+        lines.append(f"*Blocked in comments ({len(flagged)})*")
+        if not flagged:
+            lines.append("• none")
+        else:
+            for item in flagged:
+                lines.append(f"• {item['key']} {item['title']} — {item['reason']}")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def post_digest(groups: dict[str, list[Task]], today: date | None = None) -> None:
+def post_digest(
+    groups: dict[str, list[Task]],
+    today: date | None = None,
+    blockers: list[dict] | None = None,
+) -> None:
     """Send the digest to the Slack channel named in .env."""
     load_dotenv(ROOT / ".env")
     token = os.getenv("SLACK_BOT_TOKEN", "").strip()
@@ -48,7 +65,7 @@ def post_digest(groups: dict[str, list[Task]], today: date | None = None) -> Non
         print("Add your real SLACK_BOT_TOKEN to the .env file, then run this again.")
         sys.exit(1)
 
-    text = format_digest(groups, today)
+    text = format_digest(groups, today, blockers)
     client = WebClient(token=token)
     try:
         client.chat_postMessage(channel=channel, text=text)

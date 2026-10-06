@@ -145,7 +145,12 @@ def send_dm(client: WebClient, slack_user_id: str, text: str) -> None:
     client.chat_postMessage(channel=channel, text=text)
 
 
-def send_nudges(now: datetime | None = None, db_path: Path = DB_PATH) -> None:
+def send_nudges(
+    now: datetime | None = None,
+    db_path: Path = DB_PATH,
+    tasks: list[Task] | None = None,
+    render=None,
+) -> None:
     """Send one DM per person. Skip night hours and tasks already nudged today."""
     current = now or datetime.now(INDIA)
     today = current.date() if current.tzinfo is None else current.astimezone(INDIA).date()
@@ -159,7 +164,9 @@ def send_nudges(now: datetime | None = None, db_path: Path = DB_PATH) -> None:
         print("Add your real SLACK_BOT_TOKEN to the .env file, then run this again.")
         sys.exit(1)
 
-    tasks = fetch_tasks()
+    if tasks is None:
+        tasks = fetch_tasks()
+    write_message = render or format_nudge
     connection = connect(db_path)
     grouped = pending_by_person(tasks, today, sent_today(connection, today))
     if not grouped:
@@ -178,7 +185,7 @@ def send_nudges(now: datetime | None = None, db_path: Path = DB_PATH) -> None:
             print(f"No Slack user found for {assignee}. Skipped {len(person_tasks)} task(s).")
             continue
         try:
-            send_dm(client, slack_user_id, format_nudge(person_tasks, today))
+            send_dm(client, slack_user_id, write_message(person_tasks, today))
         except SlackApiError as error:
             print(f"Slack rejected the nudge for {assignee}: {error.response['error']}")
             continue

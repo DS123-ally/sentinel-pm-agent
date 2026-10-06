@@ -3,10 +3,15 @@
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
+
+from text import comments_to_text
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass
@@ -18,17 +23,12 @@ class Task:
     due_date: str
     last_updated: str
     assignee_email: str = ""
+    comments: str = ""
 
 
 def fetch_tasks() -> list[Task]:
     """Fetch every issue in the Jira project named in .env."""
-    load_dotenv()
-    base_url = os.environ["JIRA_BASE_URL"].rstrip("/")
-    email = os.environ["JIRA_EMAIL"]
-    token = os.environ["JIRA_API_TOKEN"]
-    project_key = os.environ["JIRA_PROJECT_KEY"]
-
-    auth = HTTPBasicAuth(email, token)
+    base_url, auth, project_key = _jira_auth()
     url = f"{base_url}/rest/api/3/search/jql"
     tasks: list[Task] = []
     next_page_token: str | None = None
@@ -54,6 +54,43 @@ def fetch_tasks() -> list[Task]:
             break
 
     return tasks
+
+
+def fetch_tasks_with_comments() -> list[Task]:
+    """Fetch issues, then attach comment text for every open task."""
+    tasks = fetch_tasks()
+    base_url, auth, _project_key = _jira_auth()
+    loaded: list[Task] = []
+    for task in tasks:
+        comments = ""
+        if task.status.strip().lower() != "done":
+            response = requests.get(
+                f"{base_url}/rest/api/3/issue/{task.key}/comment",
+                auth=auth,
+                timeout=30,
+            )
+            response.raise_for_status()
+            comments = comments_to_text(response.json())
+        loaded.append(
+            Task(
+                key=task.key,
+                title=task.title,
+                assignee=task.assignee,
+                status=task.status,
+                due_date=task.due_date,
+                last_updated=task.last_updated,
+                assignee_email=task.assignee_email,
+                comments=comments,
+            )
+        )
+    return loaded
+
+
+def _jira_auth() -> tuple[str, HTTPBasicAuth, str]:
+    load_dotenv(ROOT / ".env")
+    base_url = os.environ["JIRA_BASE_URL"].rstrip("/")
+    auth = HTTPBasicAuth(os.environ["JIRA_EMAIL"], os.environ["JIRA_API_TOKEN"])
+    return base_url, auth, os.environ["JIRA_PROJECT_KEY"]
 
 
 def _to_task(issue: dict) -> Task:

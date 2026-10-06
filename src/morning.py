@@ -1,9 +1,7 @@
-"""Morning run: one channel digest, then personal nudges."""
+"""Morning run: the LangGraph agent fetches, analyzes, and notifies."""
 
-from digest import send_today
-from nudge import send_nudges
+from agent import run_agent
 
 
 if __name__ == "__main__":
-    send_today()
-    send_nudges()
+    run_agent()

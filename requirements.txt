@@ -5,3 +5,4 @@ slack_sdk
 uvicorn
 pytest
 apscheduler
+langgraph
