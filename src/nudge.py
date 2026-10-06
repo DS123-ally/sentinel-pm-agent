@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from actions import nudge_blocks
 from jira import Task, fetch_tasks
 from risk import group_risks, is_due_soon, is_overdue, is_stale
 
@@ -139,10 +140,18 @@ def find_slack_user(client: WebClient, task: Task) -> str | None:
             return None
 
 
-def send_dm(client: WebClient, slack_user_id: str, text: str) -> None:
+def send_dm(
+    client: WebClient,
+    slack_user_id: str,
+    text: str,
+    blocks: list[dict] | None = None,
+) -> None:
     opened = client.conversations_open(users=slack_user_id)
     channel = opened["channel"]["id"]
-    client.chat_postMessage(channel=channel, text=text)
+    message: dict = {"channel": channel, "text": text}
+    if blocks:
+        message["blocks"] = blocks
+    client.chat_postMessage(**message)
 
 
 def send_nudges(
@@ -185,7 +194,8 @@ def send_nudges(
             print(f"No Slack user found for {assignee}. Skipped {len(person_tasks)} task(s).")
             continue
         try:
-            send_dm(client, slack_user_id, write_message(person_tasks, today))
+            message = write_message(person_tasks, today)
+            send_dm(client, slack_user_id, message, nudge_blocks(message, person_tasks))
         except SlackApiError as error:
             print(f"Slack rejected the nudge for {assignee}: {error.response['error']}")
             continue

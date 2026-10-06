@@ -20,7 +20,7 @@ LangGraph, Python, FastAPI, Jira API, Slack API, SQLite
 
 ## Status
 
-Early development. Phase 1 is done: the app can read Jira issues and print them as a table.
+Phase 6 is in progress. Nudge messages include Done, Blocked, and Need more time buttons. A click is saved locally and does not change Jira.
 
 ## Setup
 
@@ -46,4 +46,16 @@ Print every task in the Jira project:
 
 ```powershell
 python src\jira.py
+```
+
+Run the morning agent (digest, nudges, and blocker check):
+
+```powershell
+python src\morning.py
+```
+
+Listen for button clicks. With Socket Mode on, Slack does not use a Request URL. Create an app-level token with the `connections:write` scope, put it in `.env` as `SLACK_APP_TOKEN`, then run:
+
+```powershell
+python src\actions.py
 ```
