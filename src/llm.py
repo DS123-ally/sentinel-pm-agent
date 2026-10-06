@@ -40,20 +40,26 @@ def _openai(prompt: str, api_key: str) -> str:
 
 def _google(prompt: str, api_key: str) -> str:
     models = [
-        os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite"),
+        os.getenv("GOOGLE_MODEL", "gemini-3.8-flash"),
+        "gemini-3.5-flash",
         "gemini-flash-latest",
-        "gemini-2.5-flash",
     ]
     last_status = 0
     last_body = ""
     for model in models:
-        for attempt in range(2):
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"x-goog-api-key": api_key},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=60,
-            )
+        for attempt in range(1):
+            try:
+                response = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": api_key},
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    timeout=45,
+                )
+            except requests.RequestException as error:
+                last_status = 0
+                last_body = type(error).__name__
+                time.sleep(2)
+                continue
             if response.ok:
                 return response.json()["candidates"][0]["content"]["parts"][0]["text"]
             last_status = response.status_code
